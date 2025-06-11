@@ -1,360 +1,233 @@
-import requests
-from bs4 import BeautifulSoup
 from selenium import webdriver
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
 import sqlite3
-import re
 import time
-import logging
-from urllib.parse import urljoin, urlparse
-from typing import List, Dict, Set
-import concurrent.futures
-from dataclasses import dataclass
+from urllib.parse import urljoin
 
-# (check here for or bugs lines near 34, 186)
-# logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+def create_database():
+    """Create SQLite database and table"""
+    conn = sqlite3.connect('funding_opportunities.db')
+    cursor = conn.cursor()
+    
+    # Create table exactly as requested
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS funding_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            type TEXT,
+            source TEXT,
+            p_content TEXT,
+            span_content TEXT
+        )
+    ''')
+    
+    conn.commit()
+    return conn
 
-@dataclass
-class FundingOpportunity:
-    name: str
-    type: str  # 'Award', 'Grant', or 'Fund'
-    url: str
-    source_url: str
+def setup_driver():
+    """Setup Chrome driver"""
+    print("Setting up Chrome driver...")
+    
+    chrome_options = Options()
+    # Remove headless to see what's happening
+    # chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--window-size=1920,1080')
+    
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    
+    return driver
 
-class FundingScraper:
-    def __init__(self, db_path: str = "funding_opportunities.db"):
-        self.db_path = db_path
-        self.setup_database()
-        self.setup_selenium()
+def scrape_main_page():
+    """Scrape only the main page for views-row classes 1-35"""
+    url = "https://www.indiascienceandtechnology.gov.in/funding-opportunities/startups"
+    driver = None
+    
+    try:
+        driver = setup_driver()
+        print(f"Loading: {url}")
         
-        # Keywords to search for (check here for or bugs)
-        self.keywords = {
-            'award': ['award', 'awards', 'recognition', 'prize', 'competition', 'contest'],
-            'grant': ['grant', 'grants', 'funding', 'scheme', 'support', 'assistance', 'subsidy'],
-            'fund': ['fund', 'funds', 'investment', 'capital', 'finance', 'loan']
-        }
+        driver.get(url)
         
-       
-        self.patterns = {
-            'award': re.compile(r'\b(?:award|awards|recognition|prize|competition|contest)\b', re.IGNORECASE),
-            'grant': re.compile(r'\b(?:grant|grants|funding|scheme|support|assistance|subsidy)\b', re.IGNORECASE),
-            'fund': re.compile(r'\b(?:fund|funds|investment|capital|finance|loan)\b', re.IGNORECASE)
-        }
+        # Wait for page to load completely
+        print("Waiting for page to load...")
+        time.sleep(10)  # Give more time for JS to load
         
-        self.visited_urls: Set[str] = set()
+        # Try to wait for specific content
+        try:
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "views-row"))
+            )
+            print("Found views-row elements!")
+        except:
+            print("Timeout waiting for views-row elements, but continuing...")
         
-    def setup_database(self):
-       #database setup
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        # Get page source
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
         
+        # Debug: Print all classes that contain 'views-row'
+        all_views = soup.find_all('div', class_=lambda x: x and 'views-row' in str(x))
+        print(f"\nFound {len(all_views)} elements with 'views-row' in class name:")
+        
+        for i, elem in enumerate(all_views[:10]):  # Show first 10
+            print(f"Element {i+1}: classes = {elem.get('class')}")
+            h4 = elem.find('h4')
+            if h4:
+                print(f"  H4 text: {h4.get_text(strip=True)[:50]}...")
+        
+        scraped_data = []
+        
+        # Try to scrape views-row-1 through views-row-35
+        for i in range(1, 36):
+            # Try different class name patterns
+            class_patterns = [
+                f"views-row views-row-{i}",
+                f"views-row-{i}",
+            ]
+            
+            row_element = None
+            for pattern in class_patterns:
+                # Try exact match
+                row_element = soup.find('div', class_=pattern)
+                if row_element:
+                    print(f"Found row {i} with pattern: {pattern}")
+                    break
+                
+                # Try partial match
+                row_element = soup.find('div', class_=lambda x: x and pattern in ' '.join(x) if x else False)
+                if row_element:
+                    print(f"Found row {i} with partial match: {pattern}")
+                    break
+            
+            if row_element:
+                # Extract h4 and its link
+                h4_element = row_element.find('h4')
+                name = ""
+                source = ""
+                
+                if h4_element:
+                    name = h4_element.get_text(strip=True)
+                    link = h4_element.find('a')
+                    if link and link.get('href'):
+                        source = urljoin(url, link.get('href'))
+                
+                # Extract p content
+                p_element = row_element.find('p')
+                p_content = ""
+                span_content = ""
+                
+                if p_element:
+                    p_content = p_element.get_text(strip=True)
+                    
+                    # Extract span separately
+                    span_element = p_element.find('span')
+                    if span_element:
+                        span_content = span_element.get_text(strip=True)
+                
+                # Add to data
+                scraped_data.append({
+                    'name': name,
+                    'type': 'grant',
+                    'source': source,
+                    'p_content': p_content,
+                    'span_content': span_content
+                })
+                
+                print(f"Row {i}: {name[:30]}... | {source[:50]}...")
+            else:
+                print(f"Row {i}: NOT FOUND")
+        
+        print(f"\nTotal scraped: {len(scraped_data)} items")
+        return scraped_data
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+        
+    finally:
+        if driver:
+            input("Press Enter to close browser...")  # Keep browser open to see what's loaded
+            driver.quit()
+
+def save_to_database(data, conn):
+    """Save data to database"""
+    cursor = conn.cursor()
+    
+    # Clear existing data
+    cursor.execute('DELETE FROM funding_data')
+    
+    # Insert new data
+    for item in data:
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS funding_opportunities (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                type TEXT NOT NULL,
-                url TEXT NOT NULL,
-                source_url TEXT NOT NULL,
-                scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(name, url, source_url)
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        logger.info("Database initialized successfully")
+            INSERT INTO funding_data (name, type, source, p_content, span_content)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            item['name'],
+            item['type'], 
+            item['source'],
+            item['p_content'],
+            item['span_content']
+        ))
     
-    def setup_selenium(self):
-        """Setup Selenium WebDriver with optimized options."""
-        self.chrome_options = Options()
-        self.chrome_options.add_argument('--headless')
-        self.chrome_options.add_argument('--no-sandbox')
-        self.chrome_options.add_argument('--disable-dev-shm-usage')
-        self.chrome_options.add_argument('--disable-gpu')
-        self.chrome_options.add_argument('--disable-extensions')
-        self.chrome_options.add_argument('--disable-logging')
-        self.chrome_options.add_argument('--silent')
-        self.chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-        
-    def get_driver(self):
-        
-        try:
-            service = Service(ChromeDriverManager().install())
-            return webdriver.Chrome(service=service, options=self.chrome_options)
-        except Exception as e:
-            logger.error(f"Failed to create WebDriver: {e}")
-            return None
+    conn.commit()
+    print(f"Saved {len(data)} records to database")
+
+def show_database_content(conn):
+    """Show what's in the database"""
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM funding_data')
+    rows = cursor.fetchall()
     
-    def scrape_with_requests(self, url: str) -> BeautifulSoup:
-        """Scrape static content"""
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            return BeautifulSoup(response.text, 'html.parser')
-        except Exception as e:
-            logger.warning(f"Requests scraping failed for {url}: {e}")
-            return None
-    
-    def scrape_with_selenium(self, url: str) -> BeautifulSoup:
-       #js content rendering
-        driver = self.get_driver()
-        if not driver:
-            return None
-            
-        try:
-            driver.get(url)
-            # Wait for page to load
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
-            time.sleep(3) 
-            
-            # Scroll to load more content if needed
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-            
-            html = driver.page_source
-            return BeautifulSoup(html, 'html.parser')
-            
-        except Exception as e:
-            logger.warning(f"Selenium scraping failed for {url}: {e}")
-            return None
-        finally:
-            if driver:
-                driver.quit()
-    
-    def extract_text_content(self, soup: BeautifulSoup) -> str:
-       #extracting text content
-        if not soup:
-            return ""
-        
-        # Remove script and style elements
-        for script in soup(["script", "style"]):
-            script.decompose()
-        
-        return soup.get_text()
-    
-    def find_funding_opportunities(self, soup: BeautifulSoup, base_url: str) -> List[FundingOpportunity]:
-        """Extract opportunities from parsed HTML."""
-        opportunities = []
-        
-        if not soup:
-            return opportunities
-        
-        # Find all links
-        links = soup.find_all('a', href=True)
-        
-        for link in links:
-            href = link.get('href')
-            if not href:
-                continue
-                
-            # Convert relative URLs to absolute
-            full_url = urljoin(base_url, href)
-            
-            # Get link text and surrounding context
-            link_text = link.get_text(strip=True)
-            
-            # Get parent element text for more context
-            parent_text = ""
-            if link.parent:
-                parent_text = link.parent.get_text(strip=True)
-            
-            # Combine text for analysis
-            combined_text = f"{link_text} {parent_text}"
-            
-            # Check for funding opportunity keywords
-            for funding_type, pattern in self.patterns.items():
-                if pattern.search(combined_text) and len(link_text) > 3:
-                    # Clean up the name
-                    name = re.sub(r'\s+', ' ', link_text).strip()
-                    if name and len(name) > 3:
-                        opportunities.append(FundingOpportunity(
-                            name=name,
-                            type=funding_type.title(),
-                            url=full_url,
-                            source_url=base_url
-                        ))
-        
-        # Also search in headings and paragraphs for funding opportunities  (check here for or bugs)
-        for element in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'span']):
-            text = element.get_text(strip=True)
-            if len(text) < 10 or len(text) > 200: 
-                continue
-                
-            for funding_type, pattern in self.patterns.items():
-                if pattern.search(text):
-                    # Look for associated links
-                    link = element.find('a', href=True)
-                    if not link and element.parent:
-                        link = element.parent.find('a', href=True)
-                    
-                    url = urljoin(base_url, link.get('href')) if link else base_url
-                    name = re.sub(r'\s+', ' ', text).strip()
-                    
-                    if name:
-                        opportunities.append(FundingOpportunity(
-                            name=name,
-                            type=funding_type.title(),
-                            url=url,
-                            source_url=base_url
-                        ))
-        
-        return opportunities
-    
-    def scrape_url(self, url: str) -> List[FundingOpportunity]:
-        """Scrape a single URL for funding opportunities."""
-        if url in self.visited_urls:
-            return []
-            
-        self.visited_urls.add(url)
-        logger.info(f"Scraping: {url}")
-        
-        opportunities = []
-        
-        # Try requests first (faster)
-        soup = self.scrape_with_requests(url)
-        
-        # If requests fails or returns minimal content, try Selenium
-        if not soup or len(soup.get_text(strip=True)) < 500:
-            logger.info(f"Trying Selenium for {url}")
-            soup = self.scrape_with_selenium(url)
-        
-        if soup:
-            opportunities = self.find_funding_opportunities(soup, url)
-            logger.info(f"Found {len(opportunities)} opportunities on {url}")
-        else:
-            logger.error(f"Failed to scrape {url}")
-        
-        return opportunities
-    
-    def save_opportunities(self, opportunities: List[FundingOpportunity]):
-        #saving data to database
-        if not opportunities:
-            return
-            
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        saved_count = 0
-        for opp in opportunities:
-            try:
-                cursor.execute('''
-                    INSERT OR IGNORE INTO funding_opportunities 
-                    (name, type, url, source_url) 
-                    VALUES (?, ?, ?, ?)
-                ''', (opp.name, opp.type, opp.url, opp.source_url))
-                
-                if cursor.rowcount > 0:
-                    saved_count += 1
-                    
-            except sqlite3.Error as e:
-                logger.error(f"Database error: {e}")
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Saved {saved_count} new opportunities to database")
-    
-    def scrape_all_urls(self, urls: List[str], max_workers: int = 3):
-        """Scrape all URLs with controlled concurrency."""
-        all_opportunities = []
-        
-        # Process URLs with limited concurrency to avoid overwhelming servers
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_url = {executor.submit(self.scrape_url, url): url for url in urls}
-            
-            for future in concurrent.futures.as_completed(future_to_url):
-                url = future_to_url[future]
-                try:
-                    opportunities = future.result()
-                    all_opportunities.extend(opportunities)
-                    
-                    # Save opportunities periodically
-                    if opportunities:
-                        self.save_opportunities(opportunities)
-                        
-                except Exception as e:
-                    logger.error(f"Error processing {url}: {e}")
-                
-                # Small delay between requests
-                time.sleep(1)
-        
-        return all_opportunities
-    
-    def get_summary(self) -> Dict:
-       #summary of scraped data
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Total count
-        cursor.execute("SELECT COUNT(*) FROM funding_opportunities")
-        total = cursor.fetchone()[0]
-        
-        # Count by type
-        cursor.execute("SELECT type, COUNT(*) FROM funding_opportunities GROUP BY type")
-        by_type = dict(cursor.fetchall())
-        
-        # Count by source
-        cursor.execute("SELECT source_url, COUNT(*) FROM funding_opportunities GROUP BY source_url")
-        by_source = dict(cursor.fetchall())
-        
-        conn.close()
-        
-        return {
-            'total': total,
-            'by_type': by_type,
-            'by_source': by_source
-        }
+    print(f"\n=== DATABASE CONTENT ({len(rows)} records) ===")
+    for row in rows:
+        print(f"ID: {row[0]}")
+        print(f"Name: {row[1]}")
+        print(f"Type: {row[2]}")
+        print(f"Source: {row[3]}")
+        print(f"P Content: {row[4][:100]}...")
+        print(f"Span Content: {row[5]}")
+        print("-" * 50)
 
 def main():
-    # List of URLs to scrape
-    urls = [
-        #"https://www.startupindia.gov.in/",
-        #"https://www.investindia.gov.in/",
-        #"https://msh.meity.gov.in/",
-        #"https://aim.gov.in/",
-        #"https://tdb.gov.in/",
-        #"https://tdb.gov.in/india-spain-joint-call-rdi-projects-2024",
-        #"https://www.startupindia.gov.in/content/sih/en/nsa-landing.html",
-        #"https://dst.gov.in/",
-        #"https://dst.gov.in/innovation-and-technology-development-programmes",
-        "https://www.indiascienceandtechnology.gov.in/funding-opportunities/research-grants/institutional"
-    ]
+    """Main function"""
+    print("=== SIMPLE FUNDING SCRAPER ===")
+    print("Target: views-row views-row-1 to views-row views-row-35")
+    print("Fields: h4 content, href link, p content, span content")
     
-    # Initialize scraper
-    scraper = FundingScraper()
+    conn = create_database()
     
-    logger.info(f"Starting to scrape {len(urls)} URLs")
-    
-    # Scrape all URLs
-    all_opportunities = scraper.scrape_all_urls(urls)
-    
-    # Get and display summary
-    summary = scraper.get_summary()
-    
-    print("\n" + "="*50)
-    print("SCRAPING SUMMARY")
-    print("="*50)
-    print(f"Total opportunities found: {summary['total']}")
-    print(f"\nBy Type:")
-    for type_name, count in summary['by_type'].items():
-        print(f"  {type_name}: {count}")
-    
-    print(f"\nBy Source:")
-    for source, count in summary['by_source'].items():
-        print(f"  {source}: {count}")
-    
-    print(f"\nData saved to: {scraper.db_path}")
-    print("="*50)
+    try:
+        # Scrape main page
+        data = scrape_main_page()
+        
+        if data:
+            # Save to database
+            save_to_database(data, conn)
+            
+            # Show results
+            show_database_content(conn)
+            
+            print(f"\n✅ SUCCESS: Scraped {len(data)} items")
+            print("Database: funding_opportunities.db")
+        else:
+            print("\n❌ NO DATA SCRAPED")
+            print("Check if the website structure has changed")
+            
+    except Exception as e:
+        print(f"Error in main: {e}")
+        
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     main()
