@@ -14,6 +14,7 @@ from typing import List, Dict, Set
 import concurrent.futures
 from dataclasses import dataclass
 
+# (check here for or bugs lines near 34, 186)
 # logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ class FundingScraper:
         self.setup_database()
         self.setup_selenium()
         
-        # Keywords to search for
+        # Keywords to search for (check here for or bugs)
         self.keywords = {
             'award': ['award', 'awards', 'recognition', 'prize', 'competition', 'contest'],
             'grant': ['grant', 'grants', 'funding', 'scheme', 'support', 'assistance', 'subsidy'],
@@ -183,7 +184,7 @@ class FundingScraper:
                             source_url=base_url
                         ))
         
-        # Also search in headings and paragraphs for funding opportunities
+        # Also search in headings and paragraphs for funding opportunities  (check here for or bugs)
         for element in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'span']):
             text = element.get_text(strip=True)
             if len(text) < 10 or len(text) > 200: 
